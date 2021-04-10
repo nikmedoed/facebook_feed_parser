@@ -5,8 +5,9 @@ import multiprocessing as mp
 import multiprocessing.dummy as dummy_mp
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from string import Template
+from time import sleep
 
 import pymorphy2
 from bs4 import BeautifulSoup
@@ -19,11 +20,54 @@ from selenium.webdriver.support.ui import WebDriverWait
 FB_LOGIN = '89026051080'
 FB_PASSWORD = 'z6A-8Wd-XiV-VNY'
 
+# Для истории. Попытки выделить ленты в разных сообществах, для групп и пользователей
+# timeline_xpath = '//div[@data-pagelet="ProfileTimeline"]'
+# Для публичных страниц может быть актуально такое
+# document.querySelector('div[role="feed"]')
+# document.querySelectorAll('div[role="main"]')[1].children[0]
+
+posts_xpath = "div[role='article'][aria-posinset]"
+post_more_button = './/div[contains(text(), "Ещё")]'
+post_comment_more_button = './/span[starts-with(text(), "Посмотреть ещё")]'
+post_comment_more_button2 = './/span[starts-with(text(), "Показать ещё")]'
+
+textToDate_months = {
+    'января': 1,
+    'февраля': 2,
+    'марта': 3,
+    'фпреля': 4,
+    'мая': 5,
+    'июня': 6,
+    'июля': 7,
+    'августа': 8,
+    'сентября': 9,
+    'октября': 10,
+    'ноября': 11,
+    'декабря': 12
+}
+
+
+def textToDate(text):
+    date = datetime.today()
+    if text:
+        s = text.split()
+        t = int(s[0])
+        if 'ч.' in s[1]:
+            date -= timedelta(hours=t)
+        elif 'д.' in s[1]:
+            date -= timedelta(days=t)
+        elif 'мин.' in s[1]:
+            date -= timedelta(minutes=t)
+        else:
+            date = datetime(date.year, int(textToDate_months.get(s[1], date.month)), t)
+    return date
+
+
 post_xpath = "//div[@class='_5pcr userContentWrapper']"
-post_prl_xpath = "//a[@class='see_more_link']"
+comment_prl_xpath = "//a[@class='see_more_link']"
 comment_area_ol_xpath = "//a[contains(text(), 'Комментарии')]"
 comment_area_prl_xpath = "//a[contains(@class, 'CommentsPager') or contains(@data-testid, 'CommentsPager')]"
-comment_prl_xpath = "//a[@class='_5v47 fss' and text()='Ещё']"
+
 answer_area_prl_xpath = "//a[@class='UFICommentLink']"
 post_likes_class = '_3chu'
 login_url = 'https://www.facebook.com/login'
@@ -35,6 +79,7 @@ if (link != null && link.style.display != 'none') {
 link.click(); return 0;
 } else return -1;""")
 
+post_prl_xpath = "//div[role='button' and contains(., 'Ещё')]"
 js_post_prl_sqript = Template("""let link = document.evaluate("$XPATH", document, null, 
 XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
 if (link != null) {
@@ -379,6 +424,10 @@ class fbb(webdriver.Chrome):
             return True
         return True
 
+    def scroll_to_end(self):
+        for i in range(3):
+            self.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+
     def scroll_posts(self, limit, from_date=None, need_comments=True):
         """Scroll page
 
@@ -388,54 +437,57 @@ class fbb(webdriver.Chrome):
 
         :return posts_list: (list) posts
         """
+
         posts_list = []
         error_count = 0
-        for i in range(3):
-            self.execute_script("window.scrollTo(0, document.body.scrollHeight);")
 
-        try:
-            first_post = WebDriverWait(self, 5).until(EC.presence_of_element_located((By.XPATH, post_xpath)))
-        except TimeoutException:
-            return posts_list
+        # раньше искало ленту новостей, но теперь не надо
+        # try:
+        #     WebDriverWait(self, 5).until(EC.presence_of_element_located((By.TAG_NAME, posts_xpath)))
+        # except TimeoutException:
+        #     print(posts_list)
 
-        while len(posts_list) < limit:
-            flag = self.execute_script(js_post_prl_sqript.substitute(XPATH=post_prl_xpath))
-            while flag != -1:
-                flag = self.execute_script(js_post_prl_sqript.substitute(XPATH=post_prl_xpath))
+        # набирает посты по лимиту
 
-            if need_comments:
-                # flag = self.try_click_by_xpath(comment_area_prl_xpath)
-                # while flag != -1:
-                #    flag = self.try_click_by_xpath(comment_area_prl_xpath)
+        postcount = -1
 
-                flag = self.try_click_by_xpath(comment_prl_xpath)
-                while flag != -1:
-                    flag = self.try_click_by_xpath(comment_prl_xpath)
-
+        while error_count < 5:
             try:
-                self.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                posts_list = self.find_elements_by_xpath(post_xpath)
-                if posts_list is None:
-                    return []
+                mindate = datetime.today()
+                while len(posts_list) < limit and len(posts_list) != postcount:
+                    postcount = len(posts_list)
+                    self.scroll_to_end()
+                    posts_list = self.find_elements_by_tag_name(posts_xpath)
 
-                if from_date is not None and posts_list:
-                    last_post = Post('some', BeautifulSoup(posts_list[-1].get_attribute('innerHTML')))
-                    if last_post.date is not None:
-                        if last_post.date.timestamp() < from_date:
-                            return posts_list
+                # дорабатывает посты
+                for post in posts_list:
+                    # раскрыть ещё, если есть
+                    more = post.find_elements_by_xpath(post_more_button)
+                    if more:
+                        more[0].click()
+
+                    # раскрыть все комменты, если надо
+                    if need_comments:
+                        more_comments_finder = lambda: post.find_elements_by_xpath(
+                            post_comment_more_button) + post.find_elements_by_xpath(
+                            post_comment_more_button2)
+                        more_comments = more_comments_finder()
+                        while more_comments:
+                            more_comments[0].click()
+                            sleep(1)
+                            more_comments = more_comments_finder()
+
+                    # непонятная фильтрация по дате
+                    # if from_date is not None and posts_list:
+                    #     last_post = Post('some', BeautifulSoup(posts_list[-1].get_attribute('innerHTML')))
+                    #     if last_post.date is not None:
+                    #         if last_post.date.timestamp() < from_date:
+                    #             return posts_list
 
             except Exception as e:
                 print(e)
                 error_count += 1
-                if error_count > 100:
-                    if posts_list is None:
-                        return []
-
-                    return posts_list
-
-        if posts_list is None:
-            return []
-
+        posts_list = posts_list if posts_list else []
         return posts_list
 
     def get_posts(self, page_id, limit=20, from_date=None, need_coments=True):
