@@ -212,7 +212,9 @@ class Post:
         :return: (str) post's text ('' if error)
         """
         try:
-            content = post_soup.find('div', attrs={'class': re.compile(r'.*userContent.*')}).findAll('p')
+            content = post_soup.find('div', attrs={'dir': 'auto'}).find('span',
+                                                                        attrs={'dir': 'auto'}).findAll('div',
+                                                                                                       recursive=False)
             return '\n'.join(list(map(lambda x: x.text, content)))
         except Exception as e:
             print(e)
@@ -257,7 +259,7 @@ class Post:
         :return: (str) avatar url (None if error)
         """
         try:
-            return post_soup.find('img')['src']
+            return post_soup.find('image')['xlink:href']
         except Exception as e:
             print(e)
             print('crashed while reading comment icon')
@@ -424,9 +426,19 @@ class fbb(webdriver.Chrome):
             return True
         return True
 
-    def scroll_to_end(self):
-        for i in range(3):
+    def scroll_to_end(self, n=3):
+        for i in range(n):
             self.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            sleep(0.5)
+            # Привязать к загрузке элемента здесь непросто, поэтому просто ждём.
+            # При плохом интернете увеличить перерыв
+
+    def getPostDate(browser, post):
+        browser.execute_script("arguments[0].scrollIntoView();", post)
+        abilities = post.find_elements_by_xpath('.//span/a/span')
+        if len(abilities) > 0:
+            return textToDate(abilities[0].text)
+        return datetime.today()
 
     def scroll_posts(self, limit, from_date=None, need_comments=True):
         """Scroll page
@@ -437,58 +449,53 @@ class fbb(webdriver.Chrome):
 
         :return posts_list: (list) posts
         """
-
-        posts_list = []
         error_count = 0
-
-        # раньше искало ленту новостей, но теперь не надо
-        # try:
-        #     WebDriverWait(self, 5).until(EC.presence_of_element_located((By.TAG_NAME, posts_xpath)))
-        # except TimeoutException:
-        #     print(posts_list)
-
-        # набирает посты по лимиту
-
-        postcount = -1
-
+        mindate = datetime.today()
         while error_count < 5:
+            postcount = -1
+            posts_list = []
             try:
-                mindate = datetime.today()
-                while len(posts_list) < limit and len(posts_list) != postcount:
+                # набирает посты по лимиту
+                while ((from_date == None and len(posts_list) < limit) or (
+                        from_date != None and mindate >= from_date)) and (len(posts_list) != postcount):
                     postcount = len(posts_list)
-                    self.scroll_to_end()
+                    self.scroll_to_end(postcount // 3 + 1)
                     posts_list = self.find_elements_by_tag_name(posts_xpath)
+                    if len(posts_list) > 0:
+                        mindate = self.getPostDate(posts_list[-1])
 
                 # дорабатывает посты
-                for post in posts_list:
-                    # раскрыть ещё, если есть
-                    more = post.find_elements_by_xpath(post_more_button)
-                    if more:
-                        more[0].click()
+                result = []
+                for ind, post in enumerate(posts_list):
+                    try:
+                        # Даты интерактивные, и, чтобы не тратить ресурсы компа, скрываются
+                        # скроллим до поста, и получаем дату, а затем и содержимое, оно тоже скрывается
+                        postDate = self.getPostDate(post)
+                        # раскрыть ещё, если есть
+                        if not from_date or postDate >= from_date:
+                            more = post.find_elements_by_xpath(post_more_button)
+                            if more:
+                                more[0].click()
 
-                    # раскрыть все комменты, если надо
-                    if need_comments:
-                        more_comments_finder = lambda: post.find_elements_by_xpath(
-                            post_comment_more_button) + post.find_elements_by_xpath(
-                            post_comment_more_button2)
-                        more_comments = more_comments_finder()
-                        while more_comments:
-                            more_comments[0].click()
-                            sleep(1)
-                            more_comments = more_comments_finder()
+                            # раскрыть все комменты, если надо
+                            if need_comments:
+                                more_comments_finder = lambda: post.find_elements_by_xpath(
+                                    post_comment_more_button) + post.find_elements_by_xpath(
+                                    post_comment_more_button2)
+                                more_comments = more_comments_finder()
+                                while more_comments:
+                                    more_comments[0].click()
+                                    sleep(1)
+                                    more_comments = more_comments_finder()
 
-                    # непонятная фильтрация по дате
-                    # if from_date is not None and posts_list:
-                    #     last_post = Post('some', BeautifulSoup(posts_list[-1].get_attribute('innerHTML')))
-                    #     if last_post.date is not None:
-                    #         if last_post.date.timestamp() < from_date:
-                    #             return posts_list
-
+                            result.append(BeautifulSoup(post.get_attribute('innerHTML'), 'lxml'))
+                    except Exception as e:
+                        print(f'Пост {ind + 1} пропущен\n', e)
+                return result
             except Exception as e:
-                print(e)
                 error_count += 1
-        posts_list = posts_list if posts_list else []
-        return posts_list
+                print(e)
+        return posts_list if posts_list else []
 
     def get_posts(self, page_id, limit=20, from_date=None, need_coments=True):
         """Get posts from user/group
@@ -507,7 +514,7 @@ class fbb(webdriver.Chrome):
             if not self.page_avaliable():
                 print('page ' + self.__base_group_url + '/' + page_id + ' is not avaliable')
                 return []
-        return [Post(page_id, BeautifulSoup(post_el.get_attribute('innerHTML'))) for post_el in
+        return [Post(page_id, post_el) for post_el in
                 self.scroll_posts(limit + 2, from_date=from_date, need_comments=need_coments)]
 
     def enter_facebook(self, login, password):
@@ -559,7 +566,7 @@ class fbb(webdriver.Chrome):
         # options.add_argument("--headless")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-gpu")
-
+        options.add_argument("--disable-notifications")
         options.add_argument("--disable-software-rasterizer")  # maybe not needed
         options.add_argument("--disable-dev-shm-usage")  # maybe not needed
 
@@ -771,3 +778,8 @@ def get_posts(search_request):
     with dummy_mp.Pool(mp.cpu_count()) as pool:
         results = pool.map(get_posts_, rqst)
     return [post for pl in results for post in pl]
+
+
+if __name__ == "__main__":
+    app = fbb(FB_LOGIN, FB_PASSWORD)
+    app.get_posts('themeduza')
