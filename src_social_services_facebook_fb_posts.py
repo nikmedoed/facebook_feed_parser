@@ -7,14 +7,12 @@ import re
 from datetime import datetime, timedelta
 from string import Template
 from time import sleep
+import os
 
 import pymorphy2
 from bs4 import BeautifulSoup
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import NoSuchElementException
 
 FB_LOGIN = '89026051080'
 FB_PASSWORD = 'z6A-8Wd-XiV-VNY'
@@ -69,8 +67,7 @@ class Comment:
             comment_url = comment_soup.find('a', attrs={'href': re.compile('.*\?comment_id=[0-9]+&.*')})['href']
             return re.search('[0-9]+', re.search('comment_id=[0-9]+', comment_url).group(0)).group(0)
         except Exception as e:
-            print(e)
-            print('crashed while reading comment id')
+            print('crashed while reading comment id', e)
             return None
 
     def get_icon_url(self, comment_soup):
@@ -130,11 +127,10 @@ class Comment:
             if id_v1:
                 return re.search('[0-9]+', id_v1.group(0)).group(0)
             else:
-                return re.search('facebook.com/.*\?comment_id', link).group(0).replace('facebook.com/', "").replace(
+                return re.search('facebook.com/.*\?', link).group(0).replace('facebook.com/', "").replace(
                     '?comment_id', "")
         except Exception as e:
-            print(e)
-            print('crashed while searching comment owner id')
+            print('crashed while searching comment owner id', e)
             return None
 
     def __init__(self, comment_soup):
@@ -171,13 +167,14 @@ class Post:
         :return: (str) post's text ('' if error)
         """
         try:
-            content = post_soup.find('div', attrs={'dir': 'auto'}).find('span',
-                                                                        attrs={'dir': 'auto'}).findAll('div',
-                                                                                                       recursive=False)
-            return '\n'.join(list(map(lambda x: x.text, content)))
+            content = post_soup.find('div', attrs={'dir': 'auto'})
+            try:
+                cont = content.find('span', attrs={'dir': 'auto'}).findAll('div', recursive=False)
+                return '\n'.join(list(map(lambda x: x.text, cont)))
+            except:
+                return post_soup.find('span', attrs={'dir': 'auto'}).text
         except Exception as e:
-            print(e)
-            print('crashed while reading message')
+            print('crashed while reading message', e)
             return ''
 
     def get_id(self, post_soup):
@@ -188,11 +185,14 @@ class Post:
         :return: (str) '' if error
         """
         try:
-            post_url = post_soup.find('a', attrs={'href': re.compile(r'.*/posts/.*')})['href']
-            return re.search(r'/posts/([0-9]+)', post_url).group(1)
+            try:
+                post_url = post_soup.find('a', attrs={'href': re.compile(r'.*/posts/.*')})['href']
+                return re.search(r'/posts/([0-9]+)', post_url).group(1)
+            except:
+                post_url = post_soup.find('a', attrs={'href': re.compile(r'.*/permalink/.*')})['href']
+                return re.search(r'/permalink/([0-9]+)', post_url).group(1)
         except Exception as e:
-            print(e)
-            print('crashed while reading id')
+            print('crashed while reading post id', e)
             # return ''
             pass
 
@@ -277,7 +277,7 @@ class Post:
                 recursive=False
             ).span.div.span.text.split()
             like_count = float(likes[0].replace(',', '.'))
-            if len(likes) > 1 :
+            if len(likes) > 1:
                 if 'тыс.' in likes[1]:
                     like_count *= 1000
                 elif 'млн.' in likes[1]:
@@ -480,16 +480,20 @@ class fbb(webdriver.Chrome):
                             to_click = 0
                             more = post.find_elements_by_xpath(post_more_button)
                             while more and len(more) > to_click:
-                                elem = more[to_click]
-                                self.scroll_to_element(elem)
                                 try:
-                                    self.element_click(elem)
-                                    # more[0].click()
+                                    elem = more[to_click]
+                                    self.scroll_to_element(elem)
+                                    try:
+                                        elem.click()
+                                    except:
+                                        self.element_click(elem)
                                     stage += " | "
                                 except Exception as e:
-                                    print(f'Пост {ind + 1} кнопка "ещё" не нажалась: {stage}\n', e)
+                                    print(f'Пост № {ind + 1} - кнопка "Ещё" не нажалась: {stage}\n', e)
+                                m = post.find_elements_by_xpath(post_more_button)
+                                if len(m) == len(more):
                                     to_click += 1
-                                more = post.find_elements_by_xpath(post_more_button)
+                                more = m
 
                             result.append(BeautifulSoup(post.get_attribute('innerHTML'), 'lxml'))
                     except Exception as e:
@@ -517,10 +521,7 @@ class fbb(webdriver.Chrome):
             if not self.page_avaliable():
                 print('page ' + self.__base_group_url + '/' + page_id + ' is not avaliable')
                 return []
-        try:
-            first_post = WebDriverWait(self, 5).until(EC.presence_of_element_located((By.XPATH, posts_xpath)))
-        except TimeoutException:
-            print(f'Страница {page_id} могла не загрузиться, сейчас попробуем')
+        sleep(3)
         return [Post(page_id, post_el) for post_el in
                 self.scroll_posts(limit + 2, from_date=from_date, need_comments=need_coments)]
 
@@ -570,7 +571,7 @@ class fbb(webdriver.Chrome):
         :attr proxy: (str) default None
         """
         options = webdriver.ChromeOptions()
-        # options.add_argument("--headless")
+        options.add_argument("--headless")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-notifications")
@@ -580,18 +581,18 @@ class fbb(webdriver.Chrome):
         if proxy is not None:
             options.add_argument('--proxy-server=%s' % proxy)
 
-        # path_to_browser = os.environ.get('CHROME_BIN', '/usr/bin/chromium-browser')
-        # path_to_driver = os.environ.get('PATH_TO_CHROME_DRIVER', '/code/chromedriver')
-        #
-        # if os.path.isfile(path_to_browser):
-        #     options.binary_location = path_to_browser
-        # else:
-        #     raise FileExistsError(f'{path_to_browser} does not exist')
-        #
-        # if not os.path.isfile(path_to_driver):
-        #     raise FileExistsError(f'{path_to_driver} does not exist')
-        #
-        # super().__init__(path_to_driver, options=options)
+        path_to_browser = os.environ.get('CHROME_BIN', '/usr/bin/chromium-browser')
+        path_to_driver = os.environ.get('PATH_TO_CHROME_DRIVER', '/code/chromedriver')
+
+        if os.path.isfile(path_to_browser):
+            options.binary_location = path_to_browser
+        else:
+            raise FileExistsError(f'{path_to_browser} does not exist')
+
+        if not os.path.isfile(path_to_driver):
+            raise FileExistsError(f'{path_to_driver} does not exist')
+
+        super().__init__(path_to_driver, options=options)
 
         super().__init__(options=options)
 
@@ -789,8 +790,9 @@ def get_posts(search_request):
 
 if __name__ == "__main__":
     app = fbb(FB_LOGIN, FB_PASSWORD)
-    posts = app.get_posts('themeduza')
-    print(len(posts))
+    interes = ['groups/vesti24russia', 'RTRussian', 'rianru', 'rbc.ru', '1tvru', 'themeduza']
+    for i in interes:
+        posts = app.get_posts(i)
+        print(i, len(posts))
     # app.close()
     pass
-
