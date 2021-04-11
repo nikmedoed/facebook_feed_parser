@@ -3,7 +3,6 @@
 import copy
 import multiprocessing as mp
 import multiprocessing.dummy as dummy_mp
-import os
 import re
 from datetime import datetime, timedelta
 from string import Template
@@ -19,12 +18,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 FB_LOGIN = '89026051080'
 FB_PASSWORD = 'z6A-8Wd-XiV-VNY'
-
-# Для истории. Попытки выделить ленты в разных сообществах, для групп и пользователей
-# timeline_xpath = '//div[@data-pagelet="ProfileTimeline"]'
-# Для публичных страниц может быть актуально такое
-# document.querySelector('div[role="feed"]')
-# document.querySelectorAll('div[role="main"]')[1].children[0]
 
 posts_xpath = "div[role='article'][aria-posinset]"
 post_more_button = './/div[contains(text(), "Ещё")]'
@@ -63,35 +56,6 @@ def textToDate(text):
     return date
 
 
-post_xpath = "//div[@class='_5pcr userContentWrapper']"
-comment_prl_xpath = "//a[@class='see_more_link']"
-comment_area_ol_xpath = "//a[contains(text(), 'Комментарии')]"
-comment_area_prl_xpath = "//a[contains(@class, 'CommentsPager') or contains(@data-testid, 'CommentsPager')]"
-
-answer_area_prl_xpath = "//a[@class='UFICommentLink']"
-post_likes_class = '_3chu'
-login_url = 'https://www.facebook.com/login'
-base_url = 'https://www.facebook.com'
-
-js_click_script = Template("""let link = document.evaluate("$XPATH", document, null, 
-XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-if (link != null && link.style.display != 'none') {
-link.click(); return 0;
-} else return -1;""")
-
-post_prl_xpath = "//div[role='button' and contains(., 'Ещё')]"
-js_post_prl_sqript = Template("""let link = document.evaluate("$XPATH", document, null, 
-XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-if (link != null) {
-    parent = link.closest(".text_exposed_root");
-    if (parent != null && parent.classList.contains("text_exposed") != true) {
-        link.click();
-        return 0;
-    }
-}
-return -1;""")
-
-
 class Comment:
 
     def get_id(self, comment_soup):
@@ -102,7 +66,7 @@ class Comment:
         :return: (str) comment's ID (None if error)
         """
         try:
-            comment_url = comment_soup.find('a', attrs={'href': re.compile('.*\?comment_id=.*')})['href']
+            comment_url = comment_soup.find('a', attrs={'href': re.compile('.*\?comment_id=[0-9]+&.*')})['href']
             return re.search('[0-9]+', re.search('comment_id=[0-9]+', comment_url).group(0)).group(0)
         except Exception as e:
             print(e)
@@ -117,7 +81,7 @@ class Comment:
         :return: (str) author's avatar url (None if error)
         """
         try:
-            return comment_soup.find('img')['src']
+            return comment_soup.find('image')['xlink:href']
         except Exception as e:
             print(e)
             print('crashed while reading comment icon')
@@ -131,13 +95,12 @@ class Comment:
         :return: (int) Unix Timestamp (None if error)
         """
         try:
-            date = comment_soup.find('abbr')['data-utime']
-            return datetime.fromtimestamp(int(date))
+            date = comment_soup.findAll('a', attrs={'role': 'link', 'tabindex': '0'})[-1].text
+            return textToDate(date)
         except Exception as e:
             print(e)
-            print('crashed while searching date')
+            print('crashed while searching date im comment')
             return None
-        print('fe')
 
     def get_message(self, comment_soup):
         """Get comment's text
@@ -147,8 +110,8 @@ class Comment:
         :return: (str) comment's text (None if error)
         """
         try:
-            content = comment_soup.find('span', attrs={'class': re.compile('(_3l3x)|(UFICommentBody)')}).find('span')
-            return content.text
+            content = comment_soup.findAll('div', attrs={'dir': 'auto'})
+            return '\n'.join([x.text.strip() for x in content])
         except Exception as e:
             print(e)
             print('crashed while reading comment')
@@ -162,17 +125,13 @@ class Comment:
         :return: (str) author's ID (None if error)
         """
         try:
-            owner1 = comment_soup.findAll('a', attrs={
-                'data-hovercard': re.compile('.*\/user\.php\?id=.*')})
-            owner2 = comment_soup.findAll('a', attrs={
-                'href': re.compile('(.*\/user\.php\?id=.*|.*\/profile\.php\?id=.*)')})
-            if len(owner1) > 0:
-                return re.search('[0-9]+',
-                                 re.search('user\.php\?id=[0-9]+', owner1[0]['data-hovercard']).group(0)).group(0)
-            if len(owner2) > 0:
-                return re.search('[0-9]+', re.search('user\.php\?id=[0-9]+', owner2[0]['href']).group(0)).group(0)
+            link = comment_soup.a['href']
+            id_v1 = re.search('profile.php\?id=[0-9]+&', link)
+            if id_v1:
+                return re.search('[0-9]+', id_v1.group(0)).group(0)
             else:
-                return None
+                return re.search('facebook.com/.*\?comment_id', link).group(0).replace('facebook.com/', "").replace(
+                    '?comment_id', "")
         except Exception as e:
             print(e)
             print('crashed while searching comment owner id')
@@ -273,8 +232,14 @@ class Post:
         :return: (int) Unix Timestamp (None if error)
         """
         try:
-            date = post_soup.find('abbr')['data-utime']
-            return datetime.fromtimestamp(int(date))
+            date = post_soup.findAll(
+                'a',
+                attrs={
+                    'role': 'link',
+                    'tabindex': '0',
+                    'aria-label': re.compile(r'.*')
+                })[1].text
+            return textToDate(date)
         except Exception as e:
             print(e)
             print('crashed while searching date')
@@ -288,12 +253,13 @@ class Post:
         :return: (int) count of comments (0 if error)
         """
         try:
-            coments_count = post_soup.find('a', text=re.compile(r'^\s*Комментарии:\s*\d+\s*$'))
-            return int(re.search(r'\d+', coments_count.text).group(0))
+            coments_count = post_soup.find('span', text=re.compile(r'^\s*Комментарии:\s*\d+\s*$'))
+            if coments_count:
+                return int(re.search(r'\d+', coments_count.text).group(0))
         except Exception as e:
             print(e)
             print('crashed while searching number of comments')
-            return 0
+        return 0
 
     def get_likes(self, post_soup):
         """Get count of post's likes
@@ -303,11 +269,22 @@ class Post:
         :return: (int) count of likes (0 if error)
         """
         try:
-            likes = post_soup.find('span', attrs={'class': '_3dlh'})
-            return int(likes.text)
+            likes = post_soup.find(
+                'span',
+                attrs={'role': 'toolbar'}
+            ).parent.find(
+                'div',
+                recursive=False
+            ).span.div.span.text.split()
+            like_count = float(likes[0].replace(',', '.'))
+            if len(likes) > 1 :
+                if 'тыс.' in likes[1]:
+                    like_count *= 1000
+                elif 'млн.' in likes[1]:
+                    like_count *= 1000000
+            return int(like_count)
         except Exception as e:
-            print(e)
-            print('crashed while counting likes')
+            print('crashed while counting likes', e)
             return 0
 
     def get_reposts_count(self, post_soup):
@@ -318,12 +295,13 @@ class Post:
         :return: (int) count of reposts (0 if error)
         """
         try:
-            coments_count = post_soup.find('a', text=re.compile(r'^\s*Поделились:\s*\d+\s*$'))
-            return int(re.search(r'\d+', coments_count.text).group(0))
+            coments_count = post_soup.find('span', text=re.compile(r'^\s*Поделились:\s*\d+\s*$'))
+            if coments_count:
+                return int(re.search(r'\d+', coments_count.text).group(0))
         except Exception as e:
             print(e)
             print('crashed while searching number of reposts')
-            return 0
+        return 0
 
     def get_comments(self, post_soup):
         """Get comments for post
@@ -333,11 +311,8 @@ class Post:
         :return: (list) comments
         """
         try:
-            comment_el_list = []
-            for div in post_soup.findAll(lambda x: x.name == 'div' and not x.attrs):
-                l = div.findAll('div', attrs={'aria-label': re.compile(".*[Кк]омментарий.*")})
-                if len(l) > 0: comment_el_list += l
-            return [Comment(com_el) for com_el in comment_el_list if Comment(com_el).message is not None]
+            comments_soup = post_soup.findAll('div', attrs={'role': 'article'})
+            return [comm for comm in [Comment(com_el) for com_el in comments_soup] if comm is not None]
         except Exception as e:
             print(e)
             print('crashed while searching comments')
@@ -400,6 +375,11 @@ class fbb(webdriver.Chrome):
 
     def try_click_by_xpath(self, xpath):
         """Click button by xpath"""
+        js_click_script = Template("""let link = document.evaluate("$XPATH", document, null, 
+        XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+        if (link != null && link.style.display != 'none') {
+        link.click(); return 0;
+        } else return -1;""")
         return self.execute_script(js_click_script.substitute(XPATH=xpath))
 
     def page_avaliable(self):
@@ -433,8 +413,16 @@ class fbb(webdriver.Chrome):
             # Привязать к загрузке элемента здесь непросто, поэтому просто ждём.
             # При плохом интернете увеличить перерыв
 
-    def getPostDate(browser, post):
-        browser.execute_script("arguments[0].scrollIntoView();", post)
+    def scroll_to_element(self, element):
+        self.execute_script("arguments[0].scrollIntoView();", element)
+        sleep(0.5)
+
+    def element_click(self, element):
+        self.execute_script("arguments[0].click();", element)
+        sleep(0.5)
+
+    def getPostDate(self, post):
+        self.scroll_to_element(post)
         abilities = post.find_elements_by_xpath('.//span/a/span')
         if len(abilities) > 0:
             return textToDate(abilities[0].text)
@@ -470,13 +458,12 @@ class fbb(webdriver.Chrome):
                     try:
                         # Даты интерактивные, и, чтобы не тратить ресурсы компа, скрываются
                         # скроллим до поста, и получаем дату, а затем и содержимое, оно тоже скрывается
+                        stage = 'Scroll to post and date'
                         postDate = self.getPostDate(post)
                         # раскрыть ещё, если есть
                         if not from_date or postDate >= from_date:
-                            more = post.find_elements_by_xpath(post_more_button)
-                            if more:
-                                more[0].click()
 
+                            stage = 'Open comments'
                             # раскрыть все комменты, если надо
                             if need_comments:
                                 more_comments_finder = lambda: post.find_elements_by_xpath(
@@ -484,13 +471,29 @@ class fbb(webdriver.Chrome):
                                     post_comment_more_button2)
                                 more_comments = more_comments_finder()
                                 while more_comments:
-                                    more_comments[0].click()
+                                    self.element_click(more_comments[0])
+                                    stage += " | "
                                     sleep(1)
                                     more_comments = more_comments_finder()
 
+                            stage = 'More buttons'
+                            to_click = 0
+                            more = post.find_elements_by_xpath(post_more_button)
+                            while more and len(more) > to_click:
+                                elem = more[to_click]
+                                self.scroll_to_element(elem)
+                                try:
+                                    self.element_click(elem)
+                                    # more[0].click()
+                                    stage += " | "
+                                except Exception as e:
+                                    print(f'Пост {ind + 1} кнопка "ещё" не нажалась: {stage}\n', e)
+                                    to_click += 1
+                                more = post.find_elements_by_xpath(post_more_button)
+
                             result.append(BeautifulSoup(post.get_attribute('innerHTML'), 'lxml'))
                     except Exception as e:
-                        print(f'Пост {ind + 1} пропущен\n', e)
+                        print(f'Пост {ind + 1} пропущен. Этап: {stage}\n', e)
                 return result
             except Exception as e:
                 error_count += 1
@@ -514,6 +517,10 @@ class fbb(webdriver.Chrome):
             if not self.page_avaliable():
                 print('page ' + self.__base_group_url + '/' + page_id + ' is not avaliable')
                 return []
+        try:
+            first_post = WebDriverWait(self, 5).until(EC.presence_of_element_located((By.XPATH, posts_xpath)))
+        except TimeoutException:
+            print(f'Страница {page_id} могла не загрузиться, сейчас попробуем')
         return [Post(page_id, post_el) for post_el in
                 self.scroll_posts(limit + 2, from_date=from_date, need_comments=need_coments)]
 
@@ -782,4 +789,8 @@ def get_posts(search_request):
 
 if __name__ == "__main__":
     app = fbb(FB_LOGIN, FB_PASSWORD)
-    app.get_posts('themeduza')
+    posts = app.get_posts('themeduza')
+    print(len(posts))
+    # app.close()
+    pass
+
